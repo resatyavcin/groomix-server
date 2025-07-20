@@ -40,6 +40,7 @@ function handleResetScores(socket) {
     user.scoreId = undefined;
   }
 
+  io.to(room).emit("show-all-scores", false);
   io.to(room).emit("room-users", Object.values(rooms[room]));
 }
 
@@ -101,10 +102,10 @@ function handleSendScore(socket, { scoreId, score }) {
 
   const [key, user] = userEntry;
 
-  console.log(user);
-
   user.scoreId = scoreId;
   user.score = score;
+
+  console.log(convertToPieChartData(calculateMostFrequentScores(rooms[room])));
 
   io.to(room).emit(EVENT_SCORE_UPDATE, {
     username: name,
@@ -125,17 +126,16 @@ function convertToPieChartData(scoresData) {
     id: index,
     value: (item.count / totalVotes) * 100,
     label: item.score.toString(),
+    count: item.count,
   }));
 }
 
 function calculateMostFrequentScores(roomData) {
   const scoreCount = {};
 
-  // Skorları sayıyoruz
   for (const userId in roomData) {
     const user = roomData[userId];
 
-    // Skor mevcutsa ve geçerli bir sayı ise
     if (user.score !== undefined && user.score !== null) {
       const scoreKey = `${user.scoreId}:${user.score}`;
 
@@ -153,13 +153,11 @@ function calculateMostFrequentScores(roomData) {
   for (const scoreKey in scoreCount) {
     const [scoreId, score] = scoreKey.split(":");
 
-    // NaN kontrolü
     const parsedScoreId = parseInt(scoreId);
     const parsedScore = parseInt(score);
 
-    // Eğer scoreId veya score NaN ise, varsayılan değerler kullanıyoruz
     if (isNaN(parsedScoreId) || isNaN(parsedScore)) {
-      continue; // Geçersiz scoreId veya score durumunda o öğeyi geçiyoruz
+      continue;
     }
 
     // Skorları ve en yüksek skoru güncelliyoruz
