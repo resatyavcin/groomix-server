@@ -76,13 +76,25 @@ function handleJoinRoom(socket, { room, name, isAdmin, deviceId }) {
     rooms[room][socket.id].score = previousScore;
     rooms[room][socket.id].scoreId = previousScoreId;
 
+    const scoresData = getScoreCounts(rooms[room]);
+
+    // Ortalama puanı hesapla
+    const totalVotes = scoresData.reduce((sum, item) => sum + item.count, 0);
+    const average =
+      scoresData.reduce((sum, item) => sum + item.score * item.count, 0) /
+      totalVotes;
+
+    // winnerScore'u hesapla
+    const winnerScore = findClosestFibonacci(average);
+
+    // Grafik verisi oluştur
+    const pieChartData = convertToPieChartData(scoresData);
+
     socket.emit(EVENT_SCORE_UPDATE, {
       username: name,
       score: previousScore,
       scoreId: previousScoreId,
-      calculateScore: convertToPieChartData(
-        calculateMostFrequentScores(rooms[room])
-      ),
+      calculateScore: { chart: pieChartData, winnerScore },
     });
   }
 
@@ -105,24 +117,31 @@ function handleSendScore(socket, { scoreId, score }) {
   user.scoreId = scoreId;
   user.score = score;
 
-  console.log(convertToPieChartData(calculateMostFrequentScores(rooms[room])));
+  const scoresData = getScoreCounts(rooms[room]);
+
+  // Ortalama puanı hesapla
+  const totalVotes = scoresData.reduce((sum, item) => sum + item.count, 0);
+  const average =
+    scoresData.reduce((sum, item) => sum + item.score * item.count, 0) /
+    totalVotes;
+
+  // winnerScore'u hesapla
+  const winnerScore = findClosestFibonacci(average);
+
+  // Grafik verisi oluştur
+  const pieChartData = convertToPieChartData(scoresData);
 
   io.to(room).emit(EVENT_SCORE_UPDATE, {
     username: name,
     score,
     scoreId,
-    calculateScore: convertToPieChartData(
-      calculateMostFrequentScores(rooms[room])
-    ),
+    calculateScore: { chart: pieChartData, winnerScore },
   });
 }
 
 function convertToPieChartData(scoresData) {
   const totalVotes = scoresData.reduce((sum, item) => sum + item.count, 0);
-
-  const filteredScores = scoresData.filter((item) => item.score !== 0);
-
-  return filteredScores.map((item, index) => ({
+  return scoresData.map((item, index) => ({
     id: index,
     value: (item.count / totalVotes) * 100,
     label: item.score.toString(),
@@ -130,65 +149,47 @@ function convertToPieChartData(scoresData) {
   }));
 }
 
-function calculateMostFrequentScores(roomData) {
-  const scoreCount = {};
+function getScoreCounts(roomData) {
+  const counts = {};
 
   for (const userId in roomData) {
     const user = roomData[userId];
+    if (!user) continue;
 
-    if (user.score !== undefined && user.score !== null) {
-      const scoreKey = `${user.scoreId}:${user.score}`;
-
-      if (scoreCount[scoreKey]) {
-        scoreCount[scoreKey] += 1;
-      } else {
-        scoreCount[scoreKey] = 1;
-      }
+    const score = user.score;
+    if (score !== undefined && score !== null && score !== 0) {
+      counts[score] = (counts[score] || 0) + 1;
     }
   }
 
-  let result = [];
-  let maxCount = 0;
+  return Object.entries(counts).map(([score, count]) => ({
+    score: parseInt(score),
+    count,
+  }));
+}
 
-  for (const scoreKey in scoreCount) {
-    const [scoreId, score] = scoreKey.split(":");
+function findClosestFibonacci(target) {
+  if (target <= 0) return 0;
 
-    const parsedScoreId = parseInt(scoreId);
-    const parsedScore = parseInt(score);
-
-    if (isNaN(parsedScoreId) || isNaN(parsedScore)) {
-      continue;
-    }
-
-    // Skorları ve en yüksek skoru güncelliyoruz
-    if (scoreCount[scoreKey] > maxCount) {
-      maxCount = scoreCount[scoreKey];
-      result = [
-        {
-          scoreId: parsedScoreId,
-          score: parsedScore,
-          count: maxCount,
-          winScore: true,
-        },
-      ];
-    } else if (scoreCount[scoreKey] === maxCount) {
-      result.push({
-        scoreId: parsedScoreId,
-        score: parsedScore,
-        count: maxCount,
-        winScore: true,
-      });
-    } else {
-      result.push({
-        scoreId: parsedScoreId,
-        score: parsedScore,
-        count: scoreCount[scoreKey],
-        winScore: false,
-      });
-    }
+  let a = 0,
+    b = 1;
+  while (b < target) {
+    const next = a + b;
+    a = b;
+    b = next;
   }
 
-  return result;
+  const distA = Math.abs(target - a);
+  const distB = Math.abs(b - target);
+
+  if (distA < distB) {
+    return a;
+  } else if (distB < distA) {
+    return b;
+  } else {
+    // Eşit uzaklık durumunda büyük olanı döndür
+    return b;
+  }
 }
 
 const PORT = process.env.PORT || 3001;
