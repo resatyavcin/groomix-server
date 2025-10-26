@@ -8,10 +8,13 @@ const EVENT_SEND_SCORE = "send-score";
 const EVENT_SCORE_UPDATE = "score-update";
 const EVENT_RESET_SCORES = "reset-scores";
 const EVENT_SHOW_ALL_SCORES = "show-all-scores";
+const EVENT_DISCONNECT = "disconnect";
 
 const app = express();
 const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
+const io = new Server(server, { cors: { origin: "*" }, pingInterval: 2000, pingTimeout: 2300 });
+
+
 
 const rooms = {};
 
@@ -19,15 +22,17 @@ io.on("connection", (socket) => {
   socket.on(EVENT_JOIN_ROOM, (payload) => handleJoinRoom(socket, payload));
   socket.on(EVENT_SEND_SCORE, (payload) => handleSendScore(socket, payload));
   socket.on(EVENT_RESET_SCORES, () => handleResetScores(socket));
-  socket.on(EVENT_SHOW_ALL_SCORES, (payload) =>
-    handleShowAllScores(socket, payload)
-  );
+    socket.on(EVENT_SHOW_ALL_SCORES, (payload) =>
+        handleShowAllScores(socket, payload)
+    );
+    socket.on(EVENT_DISCONNECT, (payload) =>
+        handleDisconnect(socket, payload)
+    );
 });
 
 function handleShowAllScores(socket, { show }) {
   const { room } = socket.data;
   if (!room) return;
-
   io.to(room).emit("show-all-scores", show);
 }
 
@@ -36,73 +41,82 @@ function handleResetScores(socket) {
   if (!room || !rooms[room]) return;
 
   for (const user of Object.values(rooms[room])) {
-    user.score = undefined;
-    user.scoreId = undefined;
+    user.selectedScore = null;
   }
+
 
   io.to(room).emit("show-all-scores", false);
   io.to(room).emit("room-users", Object.values(rooms[room]));
+  io.to(room).emit("is-reset", true);
+
 }
 
-function handleJoinRoom(socket, { room, name, isAdmin, deviceId }) {
-  socket.join(room);
-  socket.data = { room, name, isAdmin, deviceId };
-
-  if (!rooms[room]) {
-    rooms[room] = {};
-  }
-
-  let previousScore = null;
-  let previousScoreId = null;
-
-  for (const [id, user] of Object.entries(rooms[room])) {
-    const isSameDevice = deviceId && user.deviceId === deviceId;
-    const isInvalidUser = !user.deviceId;
-
-    if (isSameDevice) {
-      previousScore = user.score || null;
-      previousScoreId = user.scoreId || null;
-      delete rooms[room][id];
+function handleJoinRoom(socket, { userId, room, name, isAdmin, deviceId }) {
+    socket.join(room);
+    socket.data = { room, name, isAdmin, deviceId, userId };
+    if (!rooms[room]) {
+        rooms[room] = {};
     }
 
-    if (isInvalidUser) {
-      delete rooms[room][id];
+    // 🔹 Aynı deviceId ile bağlanan eski kullanıcı var mı kontrol et
+    let existingSocketId = null;
+    for (const [id, user] of Object.entries(rooms[room])) {
+        if (user.deviceId === deviceId) {
+            existingSocketId = id;
+            break;
+        }
     }
-  }
 
-  rooms[room][socket.id] = { name, deviceId, isAdmin };
+    if (existingSocketId) {
+        const existingUser = rooms[room][existingSocketId];
+        delete rooms[room][existingSocketId];
 
-  if (previousScore !== null) {
-    rooms[room][socket.id].score = previousScore;
-    rooms[room][socket.id].scoreId = previousScoreId;
+        rooms[room][socket.id] = {
+            id: userId,
+            name,
+            isAdmin,
+            deviceId,
+            selectedScore: existingUser.selectedScore ?? null,
+            isOnline: true,
 
-    const scoresData = getScoreCounts(rooms[room]);
+        };
 
-    // Ortalama puanı hesapla
-    const totalVotes = scoresData.reduce((sum, item) => sum + item.count, 0);
-    const average =
-      scoresData.reduce((sum, item) => sum + item.score * item.count, 0) /
-      totalVotes;
+        // 🔸 Önceki seçimi varsa client’a geri gönder
+        if (existingUser?.selectedScore) {
+            socket.emit(EVENT_SCORE_UPDATE, {
+                user: {
+                    id: userId,
+                    name,
+                    isAdmin,
+                    deviceId,
+                    selectedScore: existingUser.selectedScore,
+                    isOnline: true,
 
-    // winnerScore'u hesapla
-    const winnerScore = findClosestFibonacci(average);
+                },
+            });
+        }
+    } else {
+        // 🔹 Yeni kullanıcı ekle
+        rooms[room][socket.id] = {
+            id: userId,
+            name,
+            isAdmin,
+            deviceId,
+            selectedScore: null,
+            isOnline: true,
+        };
+    }
+    // 🔸 Odaya yeni kullanıcı listesi yayınla
+    io.to(room).emit(EVENT_ROOM_USERS, Object.values(rooms[room]));
 
-    // Grafik verisi oluştur
-    const pieChartData = convertToPieChartData(scoresData);
-
-    socket.emit(EVENT_SCORE_UPDATE, {
-      username: name,
-      score: previousScore,
-      scoreId: previousScoreId,
-      calculateScore: { chart: pieChartData, winnerScore },
+    // 🔸 Yeni bağlanan kullanıcıyı güncelle
+    io.to(room).emit(EVENT_SCORE_UPDATE, {
+        user: rooms[room][socket.id],
     });
-  }
-
-  io.to(room).emit(EVENT_ROOM_USERS, Object.values(rooms[room]));
 }
 
-function handleSendScore(socket, { scoreId, score }) {
-  const { room, name, deviceId } = socket.data;
+function handleSendScore(socket, { scoreId, score, userId }) {
+  const { room, name, isAdmin, deviceId } = socket.data;
 
   if (!room || !rooms[room] || !deviceId) return;
 
@@ -114,16 +128,17 @@ function handleSendScore(socket, { scoreId, score }) {
 
   const [key, user] = userEntry;
 
-  user.scoreId = scoreId;
-  user.score = score;
+  user.selectedScore = {
+      score,
+      scoreId,
+  }
 
   const scoresData = getScoreCounts(rooms[room]);
 
   // Ortalama puanı hesapla
   const totalVotes = scoresData.reduce((sum, item) => sum + item.count, 0);
   const average =
-    scoresData.reduce((sum, item) => sum + item.score * item.count, 0) /
-    totalVotes;
+  scoresData.reduce((sum, item) => sum + item.score * item.count, 0) / totalVotes;
 
   // winnerScore'u hesapla
   const winnerScore = findClosestFibonacci(average);
@@ -131,12 +146,37 @@ function handleSendScore(socket, { scoreId, score }) {
   // Grafik verisi oluştur
   const pieChartData = convertToPieChartData(scoresData);
 
+
   io.to(room).emit(EVENT_SCORE_UPDATE, {
-    username: name,
-    score,
-    scoreId,
+    user: {
+        id: userId,
+        name,
+        deviceId,
+        isAdmin,
+        selectedScore: {
+            score,
+            scoreId
+        }
+    },
     calculateScore: { chart: pieChartData, winnerScore },
   });
+}
+
+function handleDisconnect(socket) {
+    const { room, userId } = socket.data || {};
+    if (!room || !rooms[room]) return;
+
+    const userEntry = Object.entries(rooms[room]).find(
+        ([_, user]) => user.id === userId
+    );
+
+    if (!userEntry) return;
+    const [socketId, user] = userEntry;
+
+    user.isOnline = false;
+    rooms[room][socketId] = user;
+
+    io.to(room).emit(EVENT_ROOM_USERS, Object.values(rooms[room]));
 }
 
 function convertToPieChartData(scoresData) {
@@ -156,7 +196,7 @@ function getScoreCounts(roomData) {
     const user = roomData[userId];
     if (!user) continue;
 
-    const score = user.score;
+    const score = user?.selectedScore?.score;
     if (score !== undefined && score !== null && score !== 0) {
       counts[score] = (counts[score] || 0) + 1;
     }
